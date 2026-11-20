@@ -1,0 +1,55 @@
+using CourseAcademy.Streaming.Api.Common.Exceptions;
+using Microsoft.EntityFrameworkCore;
+
+namespace CourseAcademy.Streaming.Api.Common.Middleware;
+
+/// <summary>Turns every unhandled exception into an <see cref="ErrorResponse"/>. Internal details are logged, never returned.</summary>
+public sealed class ExceptionHandlingMiddleware(RequestDelegate next, ILogger<ExceptionHandlingMiddleware> logger)
+{
+    public const string UnexpectedErrorMessage = "An unexpected error occurred.";
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        try
+        {
+            await next(context);
+        }
+        catch (Exception exception) when (context.RequestAborted.IsCancellationRequested)
+        {
+            // The caller went away; there is no one to answer. SQL Server reports a cancelled command as a SqlException, so any type counts.
+            logger.LogDebug(exception, "Request {Method} {Path} was cancelled by the caller.", context.Request.Method, context.Request.Path);
+        }
+        catch (Exception exception)
+        {
+            if (context.Response.HasStarted)
+            {
+                logger.LogError(exception, "Unhandled exception after the response started.");
+                throw;
+            }
+
+            var (status, body) = Map(exception);
+            if (status >= StatusCodes.Status500InternalServerError)
+            {
+                logger.LogError(exception, "Unhandled exception for {Method} {Path}", context.Request.Method, context.Request.Path);
+            }
+            else
+            {
+                logger.LogInformation("Request {Method} {Path} failed with {Status} {Code}: {Message}",
+                    context.Request.Method, context.Request.Path, status, body.Error.Code, body.Error.Message);
+            }
+
+            context.Response.Clear();
+            context.Response.StatusCode = status;
+            await context.Response.WriteAsJsonAsync(body, context.RequestAborted);
+        }
+    }
+
+    internal static (int Status, ErrorResponse Body) Map(Exception exception) => exception switch
+    {
+        AppException app => (app.StatusCode, ErrorResponse.Of(app.Code, app.Message, app.Fields)),
+        DbUpdateConcurrencyException => (StatusCodes.Status409Conflict,
+            ErrorResponse.Of(ErrorCodes.Conflict, "The item was changed at the same time. Try again.")),
+        BadHttpRequestException bad => (bad.StatusCode, ErrorResponse.Of(ErrorCodes.ValidationFailed, "The request could not be read.")),
+        _ => (StatusCodes.Status500InternalServerError, ErrorResponse.Of(ErrorCodes.Unexpected, UnexpectedErrorMessage)),
+    };
+}

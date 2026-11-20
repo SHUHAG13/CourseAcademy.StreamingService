@@ -1,0 +1,38 @@
+# Local development storage: MinIO stands in for Cloudflare R2 (same S3 API).
+# Start:  docker compose -f deploy/docker-compose.dev.yml up -d
+# Stop:   docker compose -f deploy/docker-compose.dev.yml down        (add -v to delete the stored files too)
+# Console: http://localhost:9001  (user courseacademy, password courseacademy-dev-only)
+# The user and password match Storage:AccessKey / Storage:SecretKey in appsettings.Development.json; dev only.
+name: course-academy-streaming-dev
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: courseacademy
+      MINIO_ROOT_PASSWORD: courseacademy-dev-only
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Creates the three buckets once MinIO is up, then exits.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 courseacademy courseacademy-dev-only &&
+      mc mb --ignore-existing local/course-raw local/course-hls local/course-keys"
+
+volumes:
+  minio-data:
